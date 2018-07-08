@@ -1,18 +1,10 @@
 #ifndef UbloxGPS_h
 #define UbloxGPS_h
 
-// setup in u-center
-// PRT  0-UBX in and out, 115200 baud rate
-// NAV5 Dynamic : Automotive, Fix 3D
+// setup in u-center, settings to default, default baud rate 9600
 // SBAS - EGNOS
-// MSG disable:
-// 0x01 0x06 - NAV-SOL
-// 0x0b 0x01 - AID-INI
-// 0x0a 0x07 - MON-RXR
-// 0x0a 0x02 - MON-IO
-// 0x0a 0x09 - MON-HW
-// 0x0a 0x0b - MON-HW2
-// 0x0a 0x06 - MON-MSGPP
+// PRT  0-UBX in and out, 115200 baud rate
+// save and change baud rate to 115200
 
 #include <SoftwareSerial.h>
 
@@ -207,7 +199,7 @@ int processGPS() {
           currentMsgType = MT_TIM_TP;
           payloadSize = sizeof(TIM_TP);
         } else {
-          //Serial.printf("ubx msg %x,%x, %d\n", int(((unsigned char*)(&ubxMessage))[0]), int(((unsigned char*)(&ubxMessage))[1]), micros());
+          Serial.printf("ubx msg %x,%x, %d\n", int(((unsigned char*)(&ubxMessage))[0]), int(((unsigned char*)(&ubxMessage))[1]), micros());
           // unknown message type, bail
           fpos = 0;
           continue;

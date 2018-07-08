@@ -1,5 +1,5 @@
-#include "TickProcessor.h"
 #include "Config.h"
+#include "TickProcessor.h"
 
 struct MetaData {
   unsigned char cls;
@@ -40,7 +40,7 @@ struct MetaData {
   unsigned long reserved3;     // Reserved
 };
 
-const unsigned short PROTOCOL_ID = 86;
+const unsigned short PROTOCOL_ID = 87;
 
 const int BACK_ACCEL_FINISHED_OFS = 10;
 const int SAMPLE_OFS = 10;
@@ -50,6 +50,8 @@ const int BREAK_SPEED_MIN = (int)(60 / 0.0036);
 const int SPEED_100 = (int)(100 / 0.0036);
 const int SPEED_80 = (int)(80 / 0.0036);
 const int SPEED_60 = (int)(60 / 0.0036);
+
+const int ZERO_SPEED = (int)(0.7 / 0.0036); // 0.7Km/h
 
 bool have_zero_speed = false;
 bool have_decel_speed = false;
@@ -79,9 +81,7 @@ void TickProcessor::Process(const TickData& tick, void* m, int meta_size, Meteri
   data.push(tick);
 
   MetaData *meta = (MetaData*)m;  
-    
-  const long ZERO_SPEED = meta->sAcc;
-    
+
   if (!have_zero_speed && tick.gSpeed < ZERO_SPEED)
     have_zero_speed = true;
 
@@ -108,27 +108,21 @@ void TickProcessor::Process(const TickData& tick, void* m, int meta_size, Meteri
         t = data.back(ofs);
           
         if (t->gSpeed < ZERO_SPEED) {
-          // check if prev speed is lower, then do one more step
-          if (ofs + 1 < used) {
-            if (data.back(ofs+1)->gSpeed < t->gSpeed) {
-              continue;
-            }
-          }
-          break; // zero speed detected
+          break;
         }
       }       
 
       if (t && t->gSpeed < ZERO_SPEED) {
         unsigned long a60 = 0, a80 = 0, a100 = 0;
+
+        // get t0 from the sample after 0.7km/h is reached
+        long t0 = t[1].iTOW;
   
-        long v0 = t->gSpeed;
-        long t0 = t->iTOW;
-  
-        int dump_count = ofs + 1;
+        int dump_count = ofs;
   
         for (; ofs >= 0; ofs --) {
           TickData *curt = data.back(ofs);
-          long curspeed = curt->gSpeed - v0;
+          long curspeed = curt->gSpeed;
       
           if (a100 == 0 && curspeed >= SPEED_100) a100 = ofs;
           if (a80 == 0 && curspeed >= SPEED_80) a80 = ofs;
@@ -146,7 +140,7 @@ void TickProcessor::Process(const TickData& tick, void* m, int meta_size, Meteri
        
         // resize to only needed part
         data.resize_back(dump_count);
-        lcd.drawText("Send acc req ..");
+        lcd.drawText("Sending data");
 
         TickData *d1, *d2;
         int s1, s2;
@@ -167,6 +161,7 @@ void TickProcessor::Process(const TickData& tick, void* m, int meta_size, Meteri
   }
 
   // check break
+#ifdef CHECK_FOR_DECEL  
   if (have_decel_speed && tick.gSpeed < ZERO_SPEED && used > 1) {
     TickData *prev = data.back(1);
     
@@ -217,6 +212,7 @@ void TickProcessor::Process(const TickData& tick, void* m, int meta_size, Meteri
       have_zero_speed = false;
     }
   }
+#endif  
 }
 
 

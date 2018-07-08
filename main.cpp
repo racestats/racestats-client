@@ -9,37 +9,30 @@
   MPU SCL -> Wemos SCL (D1)
 */
 
-#include "Config.h"
+//#define WAIT_ON_START
+//#define LOG_PERF
+//#define DEBUG_ACCEL
+//#define LOG_ALL
+//#define ENABLE_TIM_TP
 
 #include <Arduino.h>
-#include "LCD.h"
 
+// https://github.com/jrowberg/i2cdevlib/zipball/master
+#include <I2Cdev.h>
+
+#include "Config.h"
+#include "LCD.h"
 #include "UbloxGPS.h"
 #include "WebClient.h"
 #include "TickProcessor.h"
-
-// https://github.com/jrowberg/i2cdevlib/zipball/master
-#include "I2Cdev.h"
-
-
-#ifdef ACCEL_SAMPLING_ENABLE
-#include "MPU6050.h"
-#endif
-
-LCD lcd;
-WebClient web;
+#include "MPU.h"
 
 Metering metering;
 
 FullData fullData;
-TickProcessor processor(web, lcd);
+TickProcessor processor;
 
-#ifdef ACCEL_SAMPLING_ENABLE
-MPU6050 mpu(0x68);
-#endif
-
-int16_t AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ;
-
+#ifdef ENABLE_TIM_TP
 volatile byte interruptCounter = 0;
 volatile unsigned long interruptTime = 0;
 int numberOfInterrupts = 0;
@@ -48,6 +41,7 @@ void handleInterrupt() {
   interruptCounter++;
   interruptTime = micros();
 }
+#endif
 
 
 #include <ESP8266WiFi.h>
@@ -56,6 +50,8 @@ bool check_backend_done = false;
 
 void check_backend()
 {
+  web.update();
+  
   if (check_backend_done) return;
   
   if (WiFi.status() != WL_CONNECTED) {
@@ -74,46 +70,96 @@ void check_backend()
 #include "FS.h"
 
 void setup() {
-  Serial.begin(500000);
-  serial.begin(115200);
+  // FS init
+  bool fsOk = SPIFFS.begin();
+  bool cfgOk = cfg.Read();
+
+  if (cfg.bridgeMode)
+  {
+    Serial.begin(cfg.serialRate);
+    serial.begin(cfg.serialRate);       
+  }
+  else
+  {
+    Serial.begin(500000);
+    serial.begin(cfg.serialRate);   
+  }
+  
   delay(500);
 
-  pinMode(D6, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(D6), handleInterrupt, RISING);
-
   lcd.init();
-  web.init();
-  metering = {0.0, 0.0, 0.0};
+
+
+  if (cfg.bridgeMode)
+  {
+    // don't need mpu and etc for gps bridge mode
+    lcd.gpsScreen(true, true);
+    return;
+  }
+
   gpsSetup();
 
-#ifdef ACCEL_SAMPLING_ENABLE
-  mpu.initialize();
+#ifdef WAIT_ON_START
+  // to debug start-up
+  while (Serial.available() && Serial.read()); // empty buffer
+  while (!Serial.available()){
+    Serial.println(F("Send any character to start.\n"));
+    delay(1000);
+  }
+  while (Serial.available() && Serial.read()); // empty buffer again
+#endif  
 
-  mpu.setXGyroOffset(15);
-  mpu.setYGyroOffset(-53);
-  mpu.setZGyroOffset(10);
-  mpu.setXAccelOffset(-5976);
-  mpu.setYAccelOffset(624);
-  mpu.setZAccelOffset(1589);
-  //mpu.setDLPFMode(MPU6050_DLPF_BW_98); // 94, 3.0
-  //mpu.setDLPFMode(MPU6050_DLPF_BW_42); // 44, 4.9
-  mpu.setDLPFMode(MPU6050_DLPF_BW_20); // 21, 8.5
-  //mpu.setDLPFMode(MPU6050_DLPF_BW_10); // 10, 13.8
-  //mpu.setDLPFMode(MPU6050_DLPF_BW_5); // 5, 19
-
-  Serial.println(mpu.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
+#ifdef ENABLE_TIM_TP
+  pinMode(D6, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(D6), handleInterrupt, RISING);
 #endif
 
-  Serial.println(SPIFFS.begin() ? "FS Ok" : "FS Failed!");
+  Serial.println(fsOk ? F("FS Ok") : F("FS Failed!"));
 
   FSInfo fs_info;
   SPIFFS.info(fs_info);
     
-  char sinfo[33];
-  sprintf(sinfo, "fs %d %d %d %d %d %d", fs_info.totalBytes, fs_info.usedBytes,fs_info.blockSize,fs_info.pageSize,fs_info.maxOpenFiles,fs_info.maxPathLength);
-  Serial.println(sinfo);
-      
-  Serial.println("init end");
+  Serial.print(F("FS totalBytes "));
+  Serial.print(fs_info.totalBytes);
+  Serial.print(F(" usedBytes "));
+  Serial.print(fs_info.usedBytes);
+  Serial.print(F(" blockSize "));
+  Serial.print(fs_info.blockSize);
+  Serial.print(F(" pageSize "));
+  Serial.print(fs_info.pageSize);
+  Serial.print(F(" maxOpenFiles "));
+  Serial.print(fs_info.maxOpenFiles);
+  Serial.print(F(" maxPathLength "));
+  Serial.print(fs_info.maxPathLength);  
+  Serial.print(F("\n"));
+
+  cfg.DumpInfo(cfgOk);
+  
+  // WiFi
+  web.init();
+  metering = {0.0, 0.0, 0.0};
+
+  // accelerometer
+  mpu.initialize();
+  mpu_inited = mpu.testConnection();
+  Serial.println(mpu_inited ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+
+  if (mpu_inited)
+  {
+    mpu.setXGyroOffset(cfg.ax_offset);
+    mpu.setYGyroOffset(cfg.ay_offset);
+    mpu.setZGyroOffset(cfg.az_offset);
+    mpu.setXAccelOffset(cfg.gx_offset);
+    mpu.setYAccelOffset(cfg.gy_offset);
+    mpu.setZAccelOffset(cfg.gz_offset);
+    //mpu.setDLPFMode(MPU6050_DLPF_BW_98); // 94, 3.0
+    //mpu.setDLPFMode(MPU6050_DLPF_BW_42); // 44, 4.9
+    mpu.setDLPFMode(MPU6050_DLPF_BW_20); // 21, 8.5
+    //mpu.setDLPFMode(MPU6050_DLPF_BW_10); // 10, 13.8
+    //mpu.setDLPFMode(MPU6050_DLPF_BW_5); // 5, 19
+  }
+  
+  Serial.println(F("init end"));
 }
 
 unsigned long lastScreenUpdate = 0;
@@ -122,14 +168,16 @@ unsigned long lastDataUpdate = 0;
 unsigned long dt0 = 0, dt1 = 0, dt2 = 0, dt3 = 0, t3prev = 0, dt4 = 0;
 
 unsigned long iTOWprev = 0;
+
+#ifdef LOG_PERF
 // 60, 120, 180, 240, 300, 300+
 int histo[6];
+#endif
 
 const int MS_STEP = 100;
 
 unsigned long tprev = 0;
 
-//#define LOG_PERF
 
 struct AccVec {
   float x, y, z;
@@ -155,7 +203,8 @@ struct AccSampler {
         avg.y = (ay / n) / 16384.0;
         avg.z = (az / n) / 16384.0;
       }
-      else{
+      else
+      {
         avg.x = avg.y = avg.z = 0;
       }
       n = 0;
@@ -165,30 +214,128 @@ struct AccSampler {
     AccVec avg;
 
   private:
-    int32_t ax, ay, az;
+    int32_t ax, ay, az;    
     int32_t n;
 };
 
 
+struct AccSamplerMinMax {
+    AccSamplerMinMax() 
+    {
+      Reset();
+    }
 
-AccVec avg_cur, avg_prev, stillAcc;
-float stillAccLen;
-unsigned long last_gps_move;
+    void Reset()
+    {
+      n = 0;
+      ax = ay = az = 0;
+      minax = minay = minaz = 0;
+      maxax = maxay = maxaz = 0;
+      diffLen = avgLen = 0;
+    }
+
+    void Tick(int16_t x, int16_t y, int16_t z)
+    {
+      if (n == 0)
+      {
+        minax = maxax = x;
+        minay = maxay = y;
+        minaz = maxaz = z;
+      }
+      if (minax > x) minax = x;
+      if (maxax < x) maxax = x;
+      if (minay > y) minay = y;
+      if (maxay < y) maxay = y;
+      if (minaz > z) minaz = z;
+      if (maxaz < z) maxaz = z;
+      
+      ax += x; ay += y; az += z;
+      n++;
+    }
+
+    int32_t Max(int32_t a, int32_t b)
+    {
+      return a > b ? a : b;
+    }
+    
+    void Avg()
+    {
+      if (n > 0)
+      {
+        avg.x = (ax / n) / 16384.0;
+        avg.y = (ay / n) / 16384.0;
+        avg.z = (az / n) / 16384.0;
+
+        float dx = Max(maxax - ax/n, ax/n - minax) / 16384.0;
+        float dy = Max(maxay - ay/n, ay/n - minay) / 16384.0;
+        float dz = Max(maxaz - az/n, az/n - minaz) / 16384.0;
+
+        diffLen = sqrt(dx*dx+dy*dy+dz*dz);
+        avgLen = sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
+        n = 0;
+        ax = ay = az = 0;
+      }
+      else
+      {
+        Reset();
+      }
+    }
+
+    AccVec avg;
+    float diffLen;
+    float avgLen;
+
+  private:
+    int32_t ax, ay, az;    
+    int32_t n;
+    int32_t minax, minay, minaz;
+    int32_t maxax, maxay, maxaz;
+};
+
+AccVec gValue;
+float gLen;
+float diffAccLen;
 bool standing_still = false;
 
-//#define DEBUG_ACCEL
-//#define DEBUG_ACCEL_NO_GPS
+static long frames = 0;
 
-//#define LOG_ALL
 
 void loop() {
+  if (cfg.bridgeMode)
+  {
+    static unsigned long lastGpsScreen = 0;
+    static bool rx = false;
+    static bool tx = false;
+
+    while (serial.available() > 0) {
+      Serial.write(serial.read());
+      rx = true;
+    }
+    while (Serial.available() > 0) {
+      serial.write(Serial.read());
+      tx = true;
+    }
+
+    unsigned long now = micros();
+    if (now - lastGpsScreen >= 500000) {
+      lcd.gpsScreen(rx, tx);
+      lastGpsScreen = now;
+      tx = rx = false;
+    }
+
+    web.update();
+    return;
+  }
+  
   check_backend();
+  frames++;
   
   unsigned long t0 = t3prev;
   unsigned long t1 = micros();
   int msgType = processGPS();
   unsigned long t2 = micros();
 
+#ifdef ENABLE_TIM_TP
   if (interruptCounter > 0) {
     interruptCounter--;
     numberOfInterrupts++;
@@ -196,13 +343,15 @@ void loop() {
     Serial.printf("INT,%d,%d,%d\n", micros(), interruptTime, numberOfInterrupts);
 #endif
   }
+#endif  
 
   static unsigned long prev_acc_sample;
 
   static AccSampler avgGps;
 
-#ifdef ACCEL_SAMPLING_ENABLE
-  if (t2 - prev_acc_sample >= 10000) {
+  int16_t AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ;
+
+  if (mpu_inited && t2 - prev_acc_sample >= 10000) {
     // 100Hz sampling and low pass 21Hz, 8.5ms delay
     prev_acc_sample = t2;
 
@@ -212,23 +361,19 @@ void loop() {
     Serial.printf("ACC,%d,%d,%d,%d\n", t4, AcX, AcY, AcZ);
 #endif
     // 100Hz avg
-    static AccSampler avg;
+    static AccSamplerMinMax avg;
     avg.Tick(AcX, AcY, AcZ);
-
+    diffAccLen = avg.diffLen;
 
 #ifdef DEBUG_ACCEL
-#ifdef DEBUG_ACCEL_NO_GPS
-    if (last_gps_move == 0) last_gps_move = t2;
-#endif
-
-    float x = AcX / 16384.0 - stillAcc.x;
-    float y = AcY / 16384.0 - stillAcc.y;
-    float z = AcZ / 16384.0 - stillAcc.z;
+    float x = AcX / 16384.0 - gValue.x;
+    float y = AcY / 16384.0 - gValue.y;
+    float z = AcZ / 16384.0 - gValue.z;
 
     float acc_value = 0;
-    if (stillAccLen > 0.5) {
+    if (gLen > 0.5) {
       // accel in G
-      acc_value = sqrt(x * x + y * y + z * z) / stillAccLen * 1000;
+      acc_value = sqrt(x * x + y * y + z * z) / gLen * 1000;
       Serial.println(acc_value);
     }
 #endif
@@ -239,58 +384,40 @@ void loop() {
       avg.Avg();
 
 #ifdef LOG_ALL
-      Serial.printf("ACC_AVG,%d,%d,%d,%d\n", t4, int(avg.avg.x * 16384), int(avg.avg.y * 16384), int(avg.avg.z * 16384));
+      Serial.printf("ACC_AVG,%d,%d,%d,%d,%d,%d\n", t4, int(avg.avg.x * 16384), int(avg.avg.y * 16384), int(avg.avg.z * 16384), int(avg.avgLen * 1000), int(avg.diffLen * 1000));
 #endif
 
-      if (t4 - last_gps_move >= 4000000) {
-        // no gps move for 4 sec, lets use [-4s;-2s) avg as stillAcc (acceleration when vhc not moving)
-        stillAcc = avg_prev;
-        stillAccLen = sqrt(stillAcc.x * stillAcc.x + stillAcc.y * stillAcc.y + stillAcc.z * stillAcc.z);
+      if (avg.diffLen <= 0.04) {
+        gValue = avg.avg;
+        gLen = sqrt(gValue.x * gValue.x + gValue.y * gValue.y + gValue.z * gValue.z);
 #ifdef LOG_ALL
-        Serial.printf("ACC_STILL,%d,%d\n", t4, int(stillAccLen * 16384));
+        Serial.printf("ACC_STILL,%d,%d\n", t4, int(gLen * 16384));
 #endif
-
         standing_still = true;
-      }
-
-      if (t4 - last_gps_move >= 2000000) {
-#ifdef LOG_ALL
-        Serial.printf("ACC_PREV,%d\n", t4);
-#endif
-        // save cur avg as prev avg and last cur as prev
-        avg_prev = avg_cur;
-        avg_cur = avg.avg;
+      } else {
+        // moving with const speed (impossible in real life) or standing
+        standing_still = false;
       }
     }
 
     avgGps.Tick(AcX, AcY, AcZ);
   }
-#endif  
 
+  unsigned long t3 = micros();
+  
   if ( msgType == MT_NAV_PVT ) {
     // avg samples between gps solutions
     avgGps.Avg();
 
-    //accel - accel when standing still
-    float x = avgGps.avg.x - stillAcc.x;
-    float y = avgGps.avg.y - stillAcc.y;
-    float z = avgGps.avg.z - stillAcc.z;
+    //accel - g
+    float x = avgGps.avg.x - gValue.x;
+    float y = avgGps.avg.y - gValue.y;
+    float z = avgGps.avg.z - gValue.z;
 
     float acc_value = 0;
-    if (stillAccLen > 0.5) {
+    if (gLen > 0.5) {
       // accel in G
-      acc_value = sqrt(x * x + y * y + z * z) / stillAccLen;
-
-      /*
-        static unsigned long prev_log = 0;
-        if (t4 - prev_log > 200) {
-        prev_log = t4;
-
-        char sbuf[16];
-        dtostrf(acc_value, 7, 3, sbuf);
-        Serial.println(sbuf);
-        }
-      */
+      acc_value = sqrt(x * x + y * y + z * z) / gLen;
     }
 
 #ifdef LOG_PERF
@@ -316,35 +443,28 @@ void loop() {
     iTOWprev = ubxMessage.navPvt.iTOW;
 #endif
 
-    TickData tick;
-    tick.iTOW = ubxMessage.navPvt.iTOW;
-    tick.lat = ubxMessage.navPvt.lat;
-    tick.lon = ubxMessage.navPvt.lon;
-    tick.gSpeed = ubxMessage.navPvt.gSpeed;
-    tick.hAcc = ubxMessage.navPvt.hAcc;
-    tick.sAcc = ubxMessage.navPvt.sAcc;
-    tick.accel = long(acc_value * 16384);
-    tick.hMSL = ubxMessage.navPvt.hMSL;
-
-#ifdef LOG_ALL
-    Serial.printf("GPS_NAV,%d,%d,%d,%d,%d,%d\n", t2, tick.iTOW, tick.gSpeed, tick.accel,tick.hAcc,tick.sAcc);
-#endif
-
-
-    // need speed acc at least 2km/h to do accel calibration
-    if (tick.gSpeed > tick.sAcc || tick.sAcc >= (int)(2 / 0.0036)) {
-      standing_still = false;
-#ifndef DEBUG_ACCEL_NO_GPS
-      last_gps_move = t2;
-#ifdef LOG_ALL
-      Serial.printf("GPS_MOVE,%d\n", t2);
-#endif
-#endif
-    }
-
     if (ubxMessage.navPvt.numSV > 0) {
+      TickData tick;
+      tick.Pack(ubxMessage.navPvt, acc_value);
+
+/*
+      static long itowprev = 0;
+
+      if (tick.iTOW - itowprev > 100) {
+        Serial.println("*");
+        Serial.printf("GPS_NAV,%d,%d,%d,%d,%d,%d,%d,%d\n", t2, tick.iTOW, tick.gSpeed, tick.accel,tick.hAcc,tick.sAcc, tick.iTOW - itowprev, frames);
+      }
+
+      itowprev = tick.iTOW;
+*/
+    
+#ifdef LOG_ALL
+      Serial.printf("GPS_NAV,%d,%d,%d,%d,%d,%d\n", t2, tick.iTOW, tick.gSpeed, tick.accel,tick.hAcc,tick.sAcc);
+#endif
       processor.Process(tick, &ubxMessage.navPvt, sizeof(ubxMessage.navPvt), &metering);
     }
+
+    frames = 0;
 
     if (t1 - lastDataUpdate >= 300000) {
       lastDataUpdate = t1;
@@ -352,13 +472,26 @@ void loop() {
       fullData.numSV = ubxMessage.navPvt.numSV;
       fullData.gSpeedKm = ubxMessage.navPvt.gSpeed * 0.0036;
       sprintf(fullData.gpsTime, "%02d:%02d:%02d", ubxMessage.navPvt.hour, ubxMessage.navPvt.minute, ubxMessage.navPvt.second);
-      fullData.hAcc = ubxMessage.navPvt.hAcc / 1000.0f;
-      fullData.sAcc = ubxMessage.navPvt.sAcc / 1000.0f;
 
-      if (fullData.hAcc > 99) fullData.hAcc = 99.0f;
-      if (fullData.sAcc > 99) fullData.sAcc = 99.0f;
+      // horizontal acc
+      if (ubxMessage.navPvt.hAcc > 9990) {
+        strcpy(fullData.hAcc, "p?");
+      } else {
+        fullData.hAcc[0] = 'p';
+        dtostrf(ubxMessage.navPvt.hAcc * 0.001f, 4, 2, fullData.hAcc + 1);
+      }
+
+      // speed accuracy
+      // 9990 / 3.6   1m/s = 3.6km/h
+      if (ubxMessage.navPvt.sAcc > 2775) {
+        strcpy(fullData.sAcc, "s?");
+      } else {
+        fullData.sAcc[0] = 's';
+        dtostrf(ubxMessage.navPvt.sAcc * 0.0036f, 4, 2, fullData.sAcc + 1);
+      }
     }
   }
+  
 
   unsigned long now = micros();
   if (now - lastScreenUpdate >= 300000) {
@@ -366,10 +499,11 @@ void loop() {
     lastScreenUpdate = now;
   }
 
-
 #ifdef LOG_PERF
   // log perf
 
+  unsigned long t4 = micros();
+  
   if (t0 && t1 > t0 && t1 - t0 > dt0) {
     dt0 = t1 - t0;
     Serial.print("dt0 ");
@@ -380,22 +514,37 @@ void loop() {
     Serial.print("dt1 ");
     Serial.println(dt1);
   }
-  if (now > t2 && now - t2 > dt2) {
-    dt2 = now - t2;
+  if (t3 > t2 && t3 - t2 > dt2) {
+    dt2 = t3 - t2;
     Serial.print("dt2 ");
     Serial.println(dt2);
   }
-  if (t3 > now && t3 - now > dt3) {
-    dt3 = t3 - now;
+  if (now > t3 && now - t3 > dt3) {
+    dt3 = now - t3;
     Serial.print("dt3 ");
     Serial.println(dt3);
   }
-  if (t4 > t3 && t4 - t3 > dt4) {
-    dt4 = t4 - t3;
+  if (t4 > now && t4 - now > dt4) {
+    dt4 = t4 - now;
     Serial.print("dt4 ");
     Serial.println(dt4);
   }
   t3prev = micros();
 #endif
+}
+
+void TickData::Pack(const NAV_PVT& p, float a)
+{
+  // convert m/s -> km/h
+  int sAccKmH = (int)(float(p.sAcc) * 3.6f);
+  
+  iTOW = p.iTOW;
+  lat = p.lat;
+  lon = p.lon;
+  gSpeed = p.gSpeed > 65535 ? 65535 : p.gSpeed;
+  hAcc = p.hAcc > 10000 ? 200 : p.hAcc / 50;
+  sAcc = sAccKmH > 10000 ? 200 : sAccKmH / 50;
+  accel = uint16_t(a * 16384.f);
+  hMSL = p.hMSL / 100;
 }
 

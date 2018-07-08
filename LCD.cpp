@@ -1,17 +1,30 @@
-#include "LCD.h"
 #include <ESP8266WiFi.h>
 
-LCD::LCD()
+#include "Config.h"
+#include "LCD.h"
+#include "WebClient.h"
+
+
+//https://github.com/esp8266/Arduino/blob/master/variants/d1_mini/pins_arduino.h
+
+LCD lcd;
+
+LCD::LCD() : SSD1306(0x3c, 4, 5)
 {
   Wire.begin(4, 5);
   Wire.beginTransmission(0x3c);
   uint8_t error = Wire.endTransmission();
   if (error == 0) {
     isset = true;
-    display = new SSD1306(0x3c, 4, 5); // https://github.com/esp8266/Arduino/blob/master/variants/d1_mini/pins_arduino.h
   } else {
     isset = false;
   }
+}
+
+void LCD::drawSingleString(int16_t x, int16_t y, const char* ascii)
+{
+  uint16_t length = strlen(ascii);
+  drawStringInternal(x, y, (char*)ascii, length, getStringWidth(ascii, length));  
 }
 
 void LCD::init()
@@ -19,20 +32,37 @@ void LCD::init()
   if (!isset) {
     return;
   }
-  display->init();
-  display->flipScreenVertically();
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
+  SSD1306::init();
+  flipScreenVertically();
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  setFont(ArialMT_Plain_10);
+
+  drawSingleString(51, 0, "Racestats");
+  display();
 }
 
-void LCD::gpsScreen()
+void LCD::gpsScreen(bool rx, bool tx)
 {
-  display->clear();
-  display->setTextAlignment(TEXT_ALIGN_CENTER);
-  display->setFont(Orbitron_Light_30);
-  display->drawString(64, 6, "GPS");
-  display->drawString(64, 34, "search");
-  display->display();
+  clear();
+  setTextAlignment(TEXT_ALIGN_CENTER);
+  setFont(ArialMT_Plain_16);
+  drawSingleString(64, 16, "GPS");
+  drawSingleString(64, 34, "Bridge Mode");
+
+  setFont(ArialMT_Plain_16);
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  if (rx) drawSingleString(0, 0, "rx");
+  if (tx) drawSingleString(0, 16, "tx");
+
+  if (web.enableAP) {
+    drawSingleString(32, 0, "srv");
+  }
+
+  char buf[16];
+  sprintf(buf, "%d", cfg.serialRate);  
+  drawSingleString(64, 0, buf); 
+
+  display();
 }
 
 void LCD::drawText(const char *str)
@@ -41,91 +71,88 @@ void LCD::drawText(const char *str)
     return;
   }
 
-  display->clear();
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(11, 0, str);
-  display->display();
+  clear();
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  setFont(ArialMT_Plain_10);
+  drawSingleString(11, 0, str);
+  display();
 }
 
 extern bool standing_still;
-extern int last_web_post_code;
-
+extern bool mpu_inited;
+extern float diffAccLen;
 //0-15 - yellow
 void LCD::updateScreen(FullData* fullData, Metering* metering)
 {
-  display->clear();
+  char buf[16];
+  clear();
 
-  display->drawVerticalLine(7, 2, 8);
-  display->drawVerticalLine(6, 2, 8);
-  display->drawVerticalLine(4, 5, 5);
-  display->drawVerticalLine(3, 5, 5);
-  display->drawVerticalLine(1, 8, 2);
-  display->drawVerticalLine(0, 8, 2);
+  drawVerticalLine(7, 2, 8);
+  drawVerticalLine(6, 2, 8);
+  drawVerticalLine(4, 5, 5);
+  drawVerticalLine(3, 5, 5);
+  drawVerticalLine(1, 8, 2);
+  drawVerticalLine(0, 8, 2);
 
-  display->drawHorizontalLine(0, 0, 128); 
-  display->drawHorizontalLine(0, 15, 128); 
+  //drawHorizontalLine(0, 0, 128); 
+  drawHorizontalLine(0, 15, 128); 
 
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(11, 0, (String)fullData->numSV);
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  setFont(ArialMT_Plain_10);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    display->setTextAlignment(TEXT_ALIGN_LEFT);
-    display->setFont(ArialMT_Plain_10);
-    display->drawString(0, 13, "wifi");
+  sprintf(buf, "%d", fullData->numSV);
+  drawSingleString(11, 0, buf);
+
+  if (WiFi.status() == WL_CONNECTED || web.enableAP) {
+    drawSingleString(0, 13, web.enableAP ? "srv" : "wifi");
   }
 
-  if (standing_still) {
-    display->setTextAlignment(TEXT_ALIGN_LEFT);
-    display->setFont(ArialMT_Plain_10);
-    display->drawString(0, 24, "zG");   
+  if (!mpu_inited) {
+    drawSingleString(0, 24, "!G");
+  } else if (cfg.ax_offset == 0 && cfg.ay_offset == 0 && cfg.az_offset == 0) {
+    // not calibrated
+    drawSingleString(0, 24, "!CG");
+  } else if (standing_still) {
+    drawSingleString(0, 24, "zG");   
   }
 
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(25, 0, (String)fullData->hAcc);
+  drawSingleString(25, 0, fullData->hAcc); 
+  drawSingleString(56, 0, fullData->sAcc);
 
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(56, 0, (String)fullData->sAcc);
+  setTextAlignment(TEXT_ALIGN_RIGHT);
+  drawSingleString(128, 0, fullData->gpsTime);
 
-  display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(128, 0, fullData->gpsTime);
-
-  display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  display->setFont(ArialMT_Plain_10);
+  setTextAlignment(TEXT_ALIGN_RIGHT);
   dtostrf(metering->accel60, 3, 1, buf60);
-  display->drawString(126, 13, (String)buf60);
+  drawSingleString(126, 13, buf60);
 
-  display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  display->setFont(ArialMT_Plain_10);
+  setTextAlignment(TEXT_ALIGN_RIGHT);
   dtostrf(metering->accel80, 3, 1, buf80);
-  display->drawString(126, 25, (String)buf80);
+  drawSingleString(126, 25, buf80);
 
-  display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  display->setFont(ArialMT_Plain_10);
+  setTextAlignment(TEXT_ALIGN_RIGHT);
   dtostrf(metering->accel100, 3, 1, buf100);
-  display->drawString(126, 37, (String)buf100);
+  drawSingleString(126, 37, buf100);
 
-  char sent[16];
-  sprintf(sent, "s %d/%d %d", fullData->blobs_sent, fullData->blobs_ttl, last_web_post_code);
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(16, 40, sent);
+  
+  sprintf(buf, "s %d/%d %d", fullData->blobs_sent, fullData->blobs_ttl, web.last_post_code);
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  drawSingleString(16, 40, buf);
 
-  char gpsSpeed[4];
-  sprintf(gpsSpeed, "%03d", fullData->gSpeedKm);
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_16);
-  display->drawString(16, 16, gpsSpeed);
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  dtostrf(fullData->accel, 4, 2, buf);
+  drawSingleString(60, 16, buf);
 
-  display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->setFont(ArialMT_Plain_10);
-  display->drawString(50, 16, (String)fullData->accel);
+  // show diff in G from average for last 2 seconds
+  dtostrf(diffAccLen, 4, 2, buf);
+  drawSingleString(85, 16, buf);
 
+  sprintf(buf, "%03d", (int)fullData->gSpeedKm);
+  setTextAlignment(TEXT_ALIGN_LEFT);
+  setFont(ArialMT_Plain_16);
+  
+  drawSingleString(16, 16, buf);
 
-  display->display();
+  display();
 }
 
